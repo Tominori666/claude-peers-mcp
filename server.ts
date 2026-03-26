@@ -506,6 +506,10 @@ async function main() {
   myId = reg.id;
   log(`Registered as peer ${myId}`);
 
+  // Write peer ID to file so hooks can poll broker directly
+  const idFile = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-myid`;
+  await Bun.write(idFile, myId);
+
   // If summary generation is still running, update it when done
   if (!initialSummary) {
     summaryPromise.then(async () => {
