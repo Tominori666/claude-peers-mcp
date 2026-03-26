@@ -38,7 +38,7 @@ const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
-const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
+const BROKER_SCRIPT = new URL("./broker_supabase.ts", import.meta.url).pathname;
 
 // --- Broker communication ---
 
@@ -426,19 +426,27 @@ async function pollAndPushMessages() {
         // Non-critical, proceed without sender info
       }
 
-      // Push as channel notification — this is what makes it immediate
-      await mcp.notification({
-        method: "notifications/claude/channel",
-        params: {
-          content: msg.text,
-          meta: {
-            from_id: msg.from_id,
-            from_summary: fromSummary,
-            from_cwd: fromCwd,
-            sent_at: msg.sent_at,
+      // Write to inbox file for hook injection
+      const inboxPath = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-inbox.json`;
+      try {
+        let inbox: any[] = [];
+        try { inbox = JSON.parse(await Bun.file(inboxPath).text()); } catch {}
+        inbox.push({ from_id: msg.from_id, from_cwd: fromCwd, from_summary: fromSummary, text: msg.text, sent_at: msg.sent_at });
+        await Bun.write(inboxPath, JSON.stringify(inbox));
+      } catch (e) {
+        log(`Inbox write error: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      // Push as channel notification (best-effort, may not be supported)
+      try {
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: msg.text,
+            meta: { from_id: msg.from_id, from_summary: fromSummary, from_cwd: fromCwd, sent_at: msg.sent_at },
           },
-        },
-      });
+        });
+      } catch {}
 
       log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
