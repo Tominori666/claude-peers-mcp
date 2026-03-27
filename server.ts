@@ -156,9 +156,13 @@ Read the from_id, from_summary, and from_cwd attributes to understand who sent t
 
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: machine/directory/repo)
-- send_message: Send a message to another instance by ID
+- send_message: Send a direct message to another instance by ID
+- send_to_room: Broadcast a message to all peers in a room (general/soul/market/ops)
+- get_room_messages: Read recent messages from a room channel
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
-- check_messages: Manually check for new messages
+- check_messages: Manually check for new direct messages
+
+Rooms: general (casual), soul (identity/reflection), market (trading/analysis), ops (tasks/coordination)
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -225,6 +229,48 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {},
+    },
+  },
+  {
+    name: "send_to_room",
+    description:
+      "Broadcast a message to all peers in a room channel. Preset rooms: general, soul, market, ops. Rate limited to 1 message per 5 seconds per room.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        room_id: {
+          type: "string" as const,
+          description: "Room name (e.g. 'general', 'soul', 'market', 'ops')",
+        },
+        message: {
+          type: "string" as const,
+          description: "The message to broadcast to all peers in the room",
+        },
+      },
+      required: ["room_id", "message"],
+    },
+  },
+  {
+    name: "get_room_messages",
+    description:
+      "Retrieve recent messages from a room channel. Use since_timestamp to fetch only new messages.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        room_id: {
+          type: "string" as const,
+          description: "Room name (e.g. 'general', 'soul', 'market', 'ops')",
+        },
+        since_timestamp: {
+          type: "string" as const,
+          description: "ISO timestamp. Only messages after this time are returned. Defaults to beginning of time.",
+        },
+        limit: {
+          type: "number" as const,
+          description: "Maximum number of messages to return (default: 50)",
+        },
+      },
+      required: ["room_id"],
     },
   },
 ];
@@ -389,6 +435,66 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
               text: `Error checking messages: ${e instanceof Error ? e.message : String(e)}`,
             },
           ],
+          isError: true,
+        };
+      }
+    }
+
+    case "send_to_room": {
+      const { room_id, message } = args as { room_id: string; message: string };
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      try {
+        const result = await brokerFetch<{ ok: boolean; sent_to: number; error?: string }>("/send-to-room", {
+          from_id: myId,
+          room_id,
+          message,
+        });
+        if (!result.ok) {
+          return {
+            content: [{ type: "text" as const, text: `Failed: ${result.error}` }],
+            isError: true,
+          };
+        }
+        return {
+          content: [{ type: "text" as const, text: `Message sent to room #${room_id} (${result.sent_to} peer(s))` }],
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
+          isError: true,
+        };
+      }
+    }
+
+    case "get_room_messages": {
+      const { room_id, since_timestamp, limit } = args as {
+        room_id: string;
+        since_timestamp?: string;
+        limit?: number;
+      };
+      try {
+        const result = await brokerFetch<{ messages: Array<{ from_id: string; text: string; sent_at: string }> }>("/get-room-messages", {
+          room_id,
+          since_timestamp,
+          limit,
+        });
+        if (result.messages.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: `No messages in #${room_id}${since_timestamp ? ` since ${since_timestamp}` : ""}.` }],
+          };
+        }
+        const lines = result.messages.map((m) => `[${m.sent_at}] ${m.from_id}:\n${m.text}`);
+        return {
+          content: [{ type: "text" as const, text: `#${room_id} (${result.messages.length} messages):\n\n${lines.join("\n\n---\n\n")}` }],
+        };
+      } catch (e) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
         };
       }

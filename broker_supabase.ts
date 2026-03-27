@@ -165,6 +165,57 @@ async function handleUnregister(body: { id: string }): Promise<void> {
   await sql`DELETE FROM claude_peers WHERE id = ${body.id}`;
 }
 
+// Rate limit: 5 sec per peer per room (drop, not debounce)
+const roomRateLimit = new Map<string, number>();
+
+async function handleSendToRoom(body: {
+  from_id: string;
+  room_id: string;
+  message: string;
+}): Promise<{ ok: boolean; sent_to: number; error?: string }> {
+  const key = `${body.from_id}:${body.room_id}`;
+  const now = Date.now();
+  const last = roomRateLimit.get(key) ?? 0;
+  if (now - last < 5000) {
+    return { ok: false, sent_to: 0, error: "Rate limited (5s per peer per room)" };
+  }
+  roomRateLimit.set(key, now);
+
+  // Get all peers except sender
+  const peers = await sql<{ id: string }[]>`
+    SELECT id FROM claude_peers WHERE id != ${body.from_id}
+  `;
+  if (peers.length === 0) {
+    return { ok: true, sent_to: 0 };
+  }
+
+  for (const peer of peers) {
+    await sql`
+      INSERT INTO claude_peer_messages (from_id, to_id, text, sent_at, delivered, room_id)
+      VALUES (${body.from_id}, ${peer.id}, ${body.message}, now(), false, ${body.room_id})
+    `;
+  }
+  return { ok: true, sent_to: peers.length };
+}
+
+async function handleGetRoomMessages(body: {
+  room_id: string;
+  since_timestamp?: string;
+  limit?: number;
+}): Promise<{ messages: Message[] }> {
+  const limit = body.limit ?? 50;
+  const since = body.since_timestamp ?? new Date(0).toISOString();
+
+  const messages = await sql<Message[]>`
+    SELECT * FROM claude_peer_messages
+    WHERE room_id = ${body.room_id}
+      AND sent_at > ${since}
+    ORDER BY sent_at ASC
+    LIMIT ${limit}
+  `;
+  return { messages };
+}
+
 // --- HTTP Server ---
 
 Bun.serve({
@@ -202,6 +253,10 @@ Bun.serve({
         case "/unregister":
           await handleUnregister(body as { id: string });
           return Response.json({ ok: true });
+        case "/send-to-room":
+          return Response.json(await handleSendToRoom(body as { from_id: string; room_id: string; message: string }));
+        case "/get-room-messages":
+          return Response.json(await handleGetRoomMessages(body as { room_id: string; since_timestamp?: string; limit?: number }));
         default:
           return Response.json({ error: "not found" }, { status: 404 });
       }
