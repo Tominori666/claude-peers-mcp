@@ -73,17 +73,19 @@ function generateId(): string {
 
 // --- Handlers ---
 
-async function handleRegister(body: RegisterRequest): Promise<RegisterResponse> {
+async function handleRegister(body: RegisterRequest & { hostname?: string }): Promise<RegisterResponse> {
   const id = generateId();
+  // Allow hostname override (used by peers_helper.py to skip PID-based liveness check)
+  const hostname = body.hostname ?? HOSTNAME;
 
   // Remove existing registration for same PID on same host
   await sql`
-    DELETE FROM claude_peers WHERE pid = ${body.pid} AND hostname = ${HOSTNAME}
+    DELETE FROM claude_peers WHERE pid = ${body.pid} AND hostname = ${hostname}
   `;
 
   await sql`
     INSERT INTO claude_peers (id, pid, hostname, cwd, git_root, tty, summary, registered_at, last_seen)
-    VALUES (${id}, ${body.pid}, ${HOSTNAME}, ${body.cwd}, ${body.git_root ?? null},
+    VALUES (${id}, ${body.pid}, ${hostname}, ${body.cwd}, ${body.git_root ?? null},
             ${body.tty ?? null}, ${body.summary ?? ""}, now(), now())
   `;
   return { id };
