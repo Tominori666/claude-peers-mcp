@@ -39,23 +39,12 @@ const sql = postgres(DB_URL, { max: 5 });
 // --- Cleanup helpers ---
 
 async function cleanStalePeers() {
-  // For same-machine peers: check PID
-  const sameMachinePeers = await sql<{ id: string; pid: number }[]>`
-    SELECT id, pid FROM claude_peers WHERE hostname = ${HOSTNAME}
-  `;
-  for (const peer of sameMachinePeers) {
-    try {
-      process.kill(peer.pid, 0);
-    } catch {
-      await sql`DELETE FROM claude_peers WHERE id = ${peer.id}`;
-    }
-  }
-
-  // For cross-machine peers: expire by last_seen timeout
+  // All peers (same-machine and cross-machine): expire by last_seen timeout only
+  // PID check is unreliable when Claude Code runs in isolated shell sessions
   const cutoff = new Date(Date.now() - STALE_TIMEOUT_MS).toISOString();
   await sql`
     DELETE FROM claude_peers
-    WHERE hostname != ${HOSTNAME} AND last_seen < ${cutoff}
+    WHERE last_seen < ${cutoff}
   `;
 }
 
@@ -81,6 +70,14 @@ async function handleRegister(body: RegisterRequest & { hostname?: string }): Pr
   // Remove existing registration for same PID on same host
   await sql`
     DELETE FROM claude_peers WHERE pid = ${body.pid} AND hostname = ${hostname}
+  `;
+
+  // Also clean up ghost peers: same CWD + hostname but heartbeat expired (>30s stale)
+  // This handles the case where /mcp reconnect spawns a new PID but the old registration lingers
+  const ghostCutoff = new Date(Date.now() - 30_000).toISOString();
+  await sql`
+    DELETE FROM claude_peers
+    WHERE cwd = ${body.cwd} AND hostname = ${hostname} AND last_seen < ${ghostCutoff}
   `;
 
   await sql`
@@ -121,20 +118,8 @@ async function handleListPeers(body: ListPeersRequest): Promise<Peer[]> {
     peers = peers.filter((p: any) => p.id !== body.exclude_id);
   }
 
-  // For same-machine peers, verify PID; for remote peers, trust last_seen
-  const alive: Peer[] = [];
-  for (const p of peers) {
-    if (p.hostname === HOSTNAME) {
-      try {
-        process.kill(p.pid, 0);
-        alive.push(p as Peer);
-      } catch {
-        await sql`DELETE FROM claude_peers WHERE id = ${p.id}`;
-      }
-    } else {
-      alive.push(p as Peer);
-    }
-  }
+  // All peers: trust last_seen (stale cleanup handles expiry)
+  const alive: Peer[] = peers as Peer[];
   return alive;
 }
 
@@ -183,18 +168,21 @@ async function handleSendToRoom(body: {
   }
   roomRateLimit.set(key, now);
 
-  // Get all peers except sender
+  // 插入一条广播消息（to_id = '_room:' + room_id），不再给每个peer单独插入
+  await sql`
+    INSERT INTO claude_peer_messages (from_id, to_id, text, sent_at, delivered, room_id)
+    VALUES (${body.from_id}, ${'_room:' + body.room_id}, ${body.message}, now(), true, ${body.room_id})
+  `;
+
+  // 同时给每个peer插入DM通知（用于channel push），room_id设为null避免room历史重复
   const peers = await sql<{ id: string }[]>`
     SELECT id FROM claude_peers WHERE id != ${body.from_id}
   `;
-  if (peers.length === 0) {
-    return { ok: true, sent_to: 0 };
-  }
-
+  const roomTag = `[#${body.room_id}] `;
   for (const peer of peers) {
     await sql`
       INSERT INTO claude_peer_messages (from_id, to_id, text, sent_at, delivered, room_id)
-      VALUES (${body.from_id}, ${peer.id}, ${body.message}, now(), false, ${body.room_id})
+      VALUES (${body.from_id}, ${peer.id}, ${roomTag + body.message}, now(), false, null)
     `;
   }
   return { ok: true, sent_to: peers.length };
@@ -208,10 +196,15 @@ async function handleGetRoomMessages(body: {
   const limit = body.limit ?? 50;
   const since = body.since_timestamp ?? new Date(0).toISOString();
 
+  // 去重策略：按 from_id + sent_at 去重（兼容旧数据的N倍重复和新广播消息）
   const messages = await sql<Message[]>`
-    SELECT * FROM claude_peer_messages
-    WHERE room_id = ${body.room_id}
-      AND sent_at > ${since}
+    SELECT * FROM (
+      SELECT DISTINCT ON (from_id, sent_at) *
+      FROM claude_peer_messages
+      WHERE room_id = ${body.room_id}
+        AND sent_at > ${since}
+      ORDER BY from_id, sent_at ASC
+    ) sub
     ORDER BY sent_at ASC
     LIMIT ${limit}
   `;

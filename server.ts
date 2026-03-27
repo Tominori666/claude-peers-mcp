@@ -410,20 +410,53 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
       }
       try {
+        // First try broker poll (for messages not yet picked up by background poll)
         const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
-        if (result.messages.length === 0) {
+
+        // Also read from per-peer inbox file (messages already polled by background but channel push may have failed)
+        const inboxPath = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-inbox-${myId}.json`;
+        let inboxMessages: any[] = [];
+        try {
+          const raw = await Bun.file(inboxPath).text();
+          inboxMessages = JSON.parse(raw);
+          // Clear inbox after reading
+          await Bun.write(inboxPath, "[]");
+        } catch {
+          // No inbox or parse error, ignore
+        }
+
+        // Combine: broker poll results + inbox messages (deduplicate by sent_at + from_id)
+        const seen = new Set<string>();
+        const allMessages: Array<{ from_id: string; text: string; sent_at: string }> = [];
+
+        for (const m of result.messages) {
+          const key = `${m.from_id}:${m.sent_at}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allMessages.push(m);
+          }
+        }
+        for (const m of inboxMessages) {
+          const key = `${m.from_id}:${m.sent_at}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allMessages.push(m);
+          }
+        }
+
+        if (allMessages.length === 0) {
           return {
             content: [{ type: "text" as const, text: "No new messages." }],
           };
         }
-        const lines = result.messages.map(
+        const lines = allMessages.map(
           (m) => `From ${m.from_id} (${m.sent_at}):\n${m.text}`
         );
         return {
           content: [
             {
               type: "text" as const,
-              text: `${result.messages.length} new message(s):\n\n${lines.join("\n\n---\n\n")}`,
+              text: `${allMessages.length} new message(s):\n\n${lines.join("\n\n---\n\n")}`,
             },
           ],
         };
@@ -532,8 +565,8 @@ async function pollAndPushMessages() {
         // Non-critical, proceed without sender info
       }
 
-      // Write to inbox file for hook injection
-      const inboxPath = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-inbox.json`;
+      // Write to per-peer inbox file (avoids cross-instance clobbering)
+      const inboxPath = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-inbox-${myId}.json`;
       try {
         let inbox: any[] = [];
         try { inbox = JSON.parse(await Bun.file(inboxPath).text()); } catch {}
@@ -552,7 +585,10 @@ async function pollAndPushMessages() {
             meta: { from_id: msg.from_id, from_summary: fromSummary, from_cwd: fromCwd, sent_at: msg.sent_at },
           },
         });
-      } catch {}
+        log(`Channel push OK for msg from ${msg.from_id}`);
+      } catch (pushErr) {
+        log(`Channel push FAILED for msg from ${msg.from_id}: ${pushErr instanceof Error ? pushErr.message : String(pushErr)}`);
+      }
 
       log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
@@ -665,6 +701,10 @@ async function main() {
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  // Also clean up when stdin closes (e.g. /mcp reconnect kills the process)
+  process.stdin.on("end", cleanup);
+  process.stdin.on("close", cleanup);
+  process.on("beforeExit", cleanup);
 }
 
 main().catch((e) => {
