@@ -592,6 +592,42 @@ async function pollAndPushMessages() {
 
       log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
+
+    // Also poll room messages and push via channel
+    const WATCH_ROOMS = ["market", "general", "soul", "ops"];
+    const sinceMapPath = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-room-since-${myId.slice(0, 8)}.json`;
+    let sinceMap: Record<string, string> = {};
+    try { sinceMap = JSON.parse(await Bun.file(sinceMapPath).text()); } catch {}
+
+    for (const room of WATCH_ROOMS) {
+      try {
+        const body: any = { room_id: room, limit: 10 };
+        if (sinceMap[room]) body.since_timestamp = sinceMap[room];
+
+        const roomResult = await brokerFetch<{ messages: Array<{ from_id: string; text: string; sent_at: string }> }>("/get-room-messages", body);
+        for (const msg of roomResult.messages) {
+          if (msg.from_id === myId) {
+            // Skip own messages but update timestamp
+            if (msg.sent_at > (sinceMap[room] ?? "")) sinceMap[room] = msg.sent_at;
+            continue;
+          }
+          if (msg.sent_at > (sinceMap[room] ?? "")) sinceMap[room] = msg.sent_at;
+
+          // Push room message via channel
+          try {
+            await mcp.notification({
+              method: "notifications/claude/channel",
+              params: {
+                content: `[#${room}] ${msg.text}`,
+                meta: { from_id: msg.from_id, room_id: room, sent_at: msg.sent_at },
+              },
+            });
+          } catch {}
+        }
+      } catch {}
+    }
+    try { await Bun.write(sinceMapPath, JSON.stringify(sinceMap)); } catch {}
+
   } catch (e) {
     // Broker might be down temporarily, don't crash
     log(`Poll error: ${e instanceof Error ? e.message : String(e)}`);
