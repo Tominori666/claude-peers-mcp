@@ -648,8 +648,17 @@ async function main() {
   myId = reg.id;
   log(`Registered as peer ${myId}`);
 
-  // Write peer ID to file so hooks can poll broker directly
-  const idFile = `${process.env.USERPROFILE ?? process.env.HOME}/.claude-peers-myid`;
+  // Write peer ID to per-Claude-Code-process file (fixes multi-terminal conflict)
+  // server.ts ppid = Claude Code process, so each terminal gets its own ID file
+  const homeDir = process.env.USERPROFILE ?? process.env.HOME;
+  const idsDir = `${homeDir}/.claude-peers-ids`;
+  const { mkdirSync } = await import("fs");
+  try { mkdirSync(idsDir, { recursive: true }); } catch {}
+  const perProcessIdFile = `${idsDir}/${process.ppid}.id`;
+  await Bun.write(perProcessIdFile, myId);
+  log(`Wrote peer ID to ${perProcessIdFile} (ppid=${process.ppid})`);
+  // Backward compat: also write shared file (used by older hooks)
+  const idFile = `${homeDir}/.claude-peers-myid`;
   await Bun.write(idFile, myId);
 
   // If summary generation is still running, update it when done
@@ -696,6 +705,12 @@ async function main() {
         // Best effort
       }
     }
+    // Clean up per-process ID file
+    try {
+      const { unlinkSync } = await import("fs");
+      unlinkSync(perProcessIdFile);
+      log(`Cleaned up ${perProcessIdFile}`);
+    } catch {}
     process.exit(0);
   };
 
