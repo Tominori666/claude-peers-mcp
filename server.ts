@@ -38,7 +38,11 @@ const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
-const BROKER_SCRIPT = new URL("./broker_supabase.ts", import.meta.url).pathname;
+const BROKER_SCRIPT = (() => {
+  const p = new URL("./broker_supabase.ts", import.meta.url).pathname;
+  // On Windows, URL.pathname returns "/C:/..." — strip the leading slash
+  return p.match(/^\/[A-Za-z]:/) ? p.slice(1) : p;
+})();
 
 // --- Broker communication ---
 
