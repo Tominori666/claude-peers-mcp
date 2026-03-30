@@ -345,7 +345,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "send_message": {
-      const { to_id, message } = args as { to_id: string; message: string };
+      const { to_id, message, text } = args as { to_id: string; message?: string; text?: string };
+      const msgText = message ?? text ?? "";
       if (!myId) {
         return {
           content: [{ type: "text" as const, text: "Not registered with broker yet" }],
@@ -356,7 +357,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const result = await brokerFetch<{ ok: boolean; error?: string }>("/send-message", {
           from_id: myId,
           to_id,
-          text: message,
+          text: msgText,
         });
         if (!result.ok) {
           return {

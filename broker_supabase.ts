@@ -123,14 +123,15 @@ async function handleListPeers(body: ListPeersRequest): Promise<Peer[]> {
   return alive;
 }
 
-async function handleSendMessage(body: SendMessageRequest): Promise<{ ok: boolean; error?: string }> {
+async function handleSendMessage(body: SendMessageRequest & { message?: string }): Promise<{ ok: boolean; error?: string }> {
+  const text = body.text ?? body.message ?? "";
   const target = await sql`SELECT id FROM claude_peers WHERE id = ${body.to_id}`;
   if (target.length === 0) {
     return { ok: false, error: `Peer ${body.to_id} not found` };
   }
   await sql`
     INSERT INTO claude_peer_messages (from_id, to_id, text, sent_at, delivered)
-    VALUES (${body.from_id}, ${body.to_id}, ${body.text}, now(), false)
+    VALUES (${body.from_id}, ${body.to_id}, ${text}, now(), false)
   `;
   return { ok: true };
 }
