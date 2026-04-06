@@ -198,16 +198,20 @@ async function handleGetRoomMessages(body: {
   const since = body.since_timestamp ?? new Date(0).toISOString();
 
   // 去重策略：按 from_id + sent_at 去重（兼容旧数据的N倍重复和新广播消息）
+  // 取最新N条（先降序取limit，再升序排列输出）
   const messages = await sql<Message[]>`
     SELECT * FROM (
-      SELECT DISTINCT ON (from_id, sent_at) *
-      FROM claude_peer_messages
-      WHERE room_id = ${body.room_id}
-        AND sent_at > ${since}
-      ORDER BY from_id, sent_at ASC
-    ) sub
+      SELECT * FROM (
+        SELECT DISTINCT ON (from_id, sent_at) *
+        FROM claude_peer_messages
+        WHERE room_id = ${body.room_id}
+          AND sent_at > ${since}
+        ORDER BY from_id, sent_at ASC
+      ) deduped
+      ORDER BY sent_at DESC
+      LIMIT ${limit}
+    ) recent
     ORDER BY sent_at ASC
-    LIMIT ${limit}
   `;
   return { messages };
 }
