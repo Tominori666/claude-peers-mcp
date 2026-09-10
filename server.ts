@@ -39,7 +39,9 @@ const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = (() => {
-  const p = new URL("./broker_supabase.ts", import.meta.url).pathname;
+  // pathname は空白を %20 に符号化するので decode する
+  // (workspace が "D:/claude code test" のように空白を含むと Module not found になる)
+  const p = decodeURIComponent(new URL("./broker_supabase.ts", import.meta.url).pathname);
   // On Windows, URL.pathname returns "/C:/..." — strip the leading slash
   return p.match(/^\/[A-Za-z]:/) ? p.slice(1) : p;
 })();

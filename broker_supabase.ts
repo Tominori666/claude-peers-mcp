@@ -24,9 +24,36 @@ import type {
 } from "./shared/types.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const DB_URL =
-  process.env.CLAUDE_PEERS_SUPABASE_URL ??
-  "postgresql://postgres.gfbxccxhnazkgfgqcijl:66659570Pp!@aws-1-ap-southeast-1.pooler.supabase.com:6543/postgres";
+
+/**
+ * DSN は .env の SUPABASE_DSN から取る（ハードコード禁止・旧パスワードは無効）。
+ * このファイルは <workspace>/claude-peers-mcp/ に置かれる前提で、親を遡って .env を探す。
+ */
+function dsnFromEnvFile(): string | undefined {
+  let dir = import.meta.dir;
+  for (let i = 0; i < 4; i++) {
+    try {
+      const txt = require("fs").readFileSync(dir + "/.env", "utf-8") as string;
+      const m = txt.match(/^\s*SUPABASE_DSN\s*=\s*(.+)$/m);
+      if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+    } catch {
+      /* この階層には .env が無い */
+    }
+    const up = require("path").dirname(dir);
+    if (up === dir) break;
+    dir = up;
+  }
+  return undefined;
+}
+
+const DB_URL = process.env.CLAUDE_PEERS_SUPABASE_URL ?? dsnFromEnvFile();
+if (!DB_URL) {
+  console.error(
+    "[claude-peers broker] SUPABASE_DSN が見つからない。" +
+      " <workspace>/.env に SUPABASE_DSN を置くか CLAUDE_PEERS_SUPABASE_URL を設定すること",
+  );
+  process.exit(1);
+}
 
 // Hostname to distinguish company PC vs home PC
 const HOSTNAME = process.env.COMPUTERNAME ?? process.env.HOSTNAME ?? "unknown";
